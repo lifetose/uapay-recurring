@@ -14,6 +14,15 @@
     "typescript"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lifetose/uapay-recurring.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lifetose/uapay-recurring/issues"
+  },
+  "homepage": "https://github.com/lifetose/uapay-recurring#readme",
+  "author": "lifetose",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
