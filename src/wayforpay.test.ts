@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { createWayForPay, wayforpayOutcome } from "./wayforpay.js";
-import { signCallback } from "./wayforpay-signature.js";
+import {
+  createWayForPay,
+  wayforpayOutcome,
+  wayforpayRefundOutcome,
+} from "./wayforpay.js";
+import { signCallback, signRefund } from "./wayforpay-signature.js";
 
 const ACCOUNT = "test_merch_n1";
 const SECRET = "flk3409refn54t54t*FNJRET";
@@ -12,6 +16,30 @@ const provider = createWayForPay({
   merchantSecret: SECRET,
   merchantDomain: DOMAIN,
 });
+
+function stubbed(
+  reply: Record<string, unknown>,
+  calls: Record<string, unknown>[] = [],
+) {
+  return createWayForPay(
+    {
+      merchantAccount: ACCOUNT,
+      merchantSecret: SECRET,
+      merchantDomain: DOMAIN,
+    },
+    {
+      fetch: ((_url: string, init: RequestInit) => {
+        calls.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(reply),
+        });
+      }) as unknown as typeof globalThis.fetch,
+    },
+  );
+}
 
 function callback(overrides: Record<string, unknown> = {}, secret = SECRET) {
   const payload = {
@@ -233,5 +261,148 @@ describe("createSetupCheckout", () => {
         webhookUrl: "https://example.com/hook",
       }),
     ).rejects.toThrow(/merchant not found/);
+  });
+});
+
+describe("wayforpayRefundOutcome", () => {
+  it.each(["Refunded", "Voided"])("treats %s as refunded", (status) => {
+    expect(wayforpayRefundOutcome(status)).toBe("refunded");
+  });
+
+  it("treats Declined as failed", () => {
+    expect(wayforpayRefundOutcome("Declined")).toBe("failed");
+  });
+
+  it.each(["InProcessing", "Something new", undefined])(
+    "leaves %s pending rather than inviting a second refund",
+    (status) => {
+      expect(wayforpayRefundOutcome(status)).toBe("pending");
+    },
+  );
+});
+
+describe("refund", () => {
+  it("signs the refund over merchantAccount, orderReference, amount, currency", async () => {
+    const calls: Record<string, unknown>[] = [];
+
+    const result = await stubbed(
+      { transactionStatus: "Refunded", orderReference: "pay-1" },
+      calls,
+    ).refund({
+      reference: "pay-1",
+      amountMinor: 499,
+      currency: "USD",
+      reason: "Cancelled within fourteen days",
+    });
+
+    expect(calls[0]).toMatchObject({
+      transactionType: "REFUND",
+      orderReference: "pay-1",
+      amount: 4.99,
+      currency: "USD",
+      comment: "Cancelled within fourteen days",
+      merchantSignature: signRefund(SECRET, {
+        merchantAccount: ACCOUNT,
+        orderReference: "pay-1",
+        amount: 4.99,
+        currency: "USD",
+      }),
+    });
+
+    expect(result.outcome).toBe("refunded");
+    expect(result.amountMinor).toBe(499);
+  });
+
+  it("refunds part of a payment when asked for less than the whole", async () => {
+    const calls: Record<string, unknown>[] = [];
+
+    const result = await stubbed(
+      { transactionStatus: "Refunded" },
+      calls,
+    ).refund({ reference: "pay-1", amountMinor: 200, currency: "USD" });
+
+    expect(calls[0]).toMatchObject({ amount: 2 });
+    expect(result.amountMinor).toBe(200);
+  });
+
+  it("reports a declined refund with its reason code", async () => {
+    const result = await stubbed({
+      transactionStatus: "Declined",
+      reasonCode: 1108,
+    }).refund({ reference: "pay-1", amountMinor: 499, currency: "USD" });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.failureCode).toBe("1108");
+  });
+
+  it("holds an unrecognised status as pending", async () => {
+    const result = await stubbed({ transactionStatus: "InProcessing" }).refund({
+      reference: "pay-1",
+      amountMinor: 499,
+      currency: "USD",
+    });
+
+    expect(result.outcome).toBe("pending");
+    expect(result.failureCode).toBeUndefined();
+  });
+});
+
+describe("verifyWebhook, refund callbacks", () => {
+  it.each(["Refunded", "Voided"])(
+    "reads %s as a refund rather than a failed charge",
+    (status) => {
+      const envelope = provider.verifyWebhook(
+        callback({ transactionStatus: status }),
+      );
+
+      expect(envelope?.outcome).toBe("refunded");
+      expect(envelope?.failureCode).toBeUndefined();
+    },
+  );
+
+  it("keeps no card on a refund callback", () => {
+    expect(
+      provider.verifyWebhook(callback({ transactionStatus: "Refunded" }))?.card,
+    ).toBeUndefined();
+  });
+});
+
+describe("cancelRecurring", () => {
+  it("posts REMOVE to the regular payments endpoint, not the payments one", async () => {
+    let seen = "";
+
+    const withStub = createWayForPay(
+      {
+        merchantAccount: ACCOUNT,
+        merchantSecret: SECRET,
+        merchantDomain: DOMAIN,
+      },
+      {
+        fetch: ((url: string) => {
+          seen = url;
+
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ reasonCode: 4100, reason: "ok" }),
+          });
+        }) as unknown as typeof globalThis.fetch,
+      },
+    );
+
+    const result = await withStub.cancelRecurring("pay-1");
+
+    expect(seen).toBe("https://api.wayforpay.com/regularApi");
+    expect(result.outcome).toBe("cancelled");
+  });
+
+  it("reports a refusal instead of silently succeeding", async () => {
+    const result = await stubbed({
+      reasonCode: 4102,
+      reason: "Order not found",
+    }).cancelRecurring("pay-1");
+
+    expect(result.outcome).toBe("failed");
+    expect(result.failureCode).toBe("4102");
   });
 });

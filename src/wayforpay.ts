@@ -1,28 +1,42 @@
 import { last4Of, numeric, text, toBuffer, toMajorUnits } from "./payload.js";
 import {
+  CancelResult,
   ChargeOutcome,
   ChargeRequest,
   ChargeResult,
   ProviderOptions,
   RecurringProvider,
+  RefundOutcome,
+  RefundRequest,
+  RefundResult,
   SetupRequest,
   SetupSession,
   StoredCard,
   WebhookEnvelope,
+  WebhookOutcome,
 } from "./types.js";
 import {
   signAcknowledgement,
   signCallback,
   signPurchase,
+  signRefund,
 } from "./wayforpay-signature.js";
 
 const API_URL = "https://api.wayforpay.com/api";
+
+const REGULAR_API_URL = "https://api.wayforpay.com/regularApi";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 const APPROVED = new Set(["Approved"]);
 
 const PENDING = new Set(["InProcessing", "WaitingAuthComplete", "Pending"]);
+
+const REFUNDED = new Set(["Refunded", "Voided"]);
+
+const REFUND_DECLINED = new Set(["Declined"]);
+
+const REGULAR_API_OK = 4100;
 
 export interface WayForPayCredentials {
   merchantAccount: string;
@@ -48,6 +62,24 @@ export function wayforpayOutcome(status: string | undefined): ChargeOutcome {
   }
 
   return "failed";
+}
+
+export function wayforpayRefundOutcome(
+  status: string | undefined,
+): RefundOutcome {
+  if (status && REFUNDED.has(status)) {
+    return "refunded";
+  }
+
+  if (status && REFUND_DECLINED.has(status)) {
+    return "failed";
+  }
+
+  return "pending";
+}
+
+function wayforpayWebhookOutcome(status: string): WebhookOutcome {
+  return REFUNDED.has(status) ? "refunded" : wayforpayOutcome(status);
 }
 
 class WayForPayProvider implements RecurringProvider {
@@ -76,8 +108,9 @@ class WayForPayProvider implements RecurringProvider {
 
   private async call(
     body: Record<string, unknown>,
+    url = API_URL,
   ): Promise<WayForPayResponse> {
-    const response = await this.request(API_URL, {
+    const response = await this.request(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -178,6 +211,44 @@ class WayForPayProvider implements RecurringProvider {
     };
   }
 
+  public async refund(request: RefundRequest): Promise<RefundResult> {
+    const { merchantAccount, merchantSecret } = this.credentials;
+
+    const amount = toMajorUnits(request.amountMinor);
+
+    const response = await this.call({
+      transactionType: "REFUND",
+      apiVersion: 1,
+      merchantAccount,
+      orderReference: request.reference,
+      amount,
+      currency: request.currency,
+      comment: request.reason ?? "Refund",
+      merchantSignature: signRefund(merchantSecret, {
+        merchantAccount,
+        orderReference: request.reference,
+        amount,
+        currency: request.currency,
+      }),
+    });
+
+    const outcome = wayforpayRefundOutcome(response.transactionStatus);
+
+    return {
+      outcome,
+      providerRef: response.orderReference ?? request.reference,
+      amountMinor: request.amountMinor,
+      ...(outcome === "failed"
+        ? { failureCode: String(response.reasonCode ?? "declined") }
+        : {}),
+      raw: {
+        transactionStatus: response.transactionStatus ?? null,
+        reasonCode: response.reasonCode ?? null,
+        reason: response.reason ?? null,
+      },
+    };
+  }
+
   public async status(providerRef: string): Promise<ChargeResult> {
     const { merchantAccount, merchantSecret } = this.credentials;
 
@@ -205,15 +276,33 @@ class WayForPayProvider implements RecurringProvider {
     };
   }
 
-  public async cancelRecurring(providerRef: string): Promise<void> {
+  public async cancelRecurring(providerRef: string): Promise<CancelResult> {
     const { merchantAccount, merchantSecret } = this.credentials;
 
-    await this.call({
-      requestType: "REMOVE",
-      merchantAccount,
-      merchantPassword: merchantSecret,
-      orderReference: providerRef,
-    });
+    const response = await this.call(
+      {
+        requestType: "REMOVE",
+        merchantAccount,
+        merchantPassword: merchantSecret,
+        orderReference: providerRef,
+      },
+      REGULAR_API_URL,
+    );
+
+    const reasonCode = numeric(response.reasonCode, -1);
+    const outcome = reasonCode === REGULAR_API_OK ? "cancelled" : "failed";
+
+    return {
+      outcome,
+      providerRef,
+      ...(outcome === "failed"
+        ? { failureCode: String(response.reasonCode ?? "unknown") }
+        : {}),
+      raw: {
+        reasonCode: response.reasonCode ?? null,
+        reason: response.reason ?? null,
+      },
+    };
   }
 
   public verifyWebhook(rawBody: Buffer | string): WebhookEnvelope | null {
@@ -253,7 +342,7 @@ class WayForPayProvider implements RecurringProvider {
     }
 
     const transactionStatus = text(payload["transactionStatus"]);
-    const outcome = wayforpayOutcome(transactionStatus);
+    const outcome = wayforpayWebhookOutcome(transactionStatus);
     const recToken = text(payload["recToken"]);
     const last4 = last4Of(text(payload["cardPan"]));
     const expMonth = numeric(payload["cardExpMonth"]);

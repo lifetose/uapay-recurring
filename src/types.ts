@@ -1,5 +1,9 @@
 export type ChargeOutcome = "succeeded" | "failed" | "pending";
 
+export type RefundOutcome = "refunded" | "failed" | "pending";
+
+export type WebhookOutcome = ChargeOutcome | "refunded";
+
 export type ProviderName = "wayforpay" | "liqpay";
 
 export interface StoredCard {
@@ -39,11 +43,35 @@ export interface ChargeResult {
   raw?: Record<string, unknown>;
 }
 
+export type CancelOutcome = "cancelled" | "failed";
+
+export interface CancelResult {
+  outcome: CancelOutcome;
+  providerRef: string;
+  failureCode?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface RefundRequest {
+  reference: string;
+  amountMinor: number;
+  currency: string;
+  reason?: string;
+}
+
+export interface RefundResult {
+  outcome: RefundOutcome;
+  providerRef: string;
+  amountMinor: number;
+  failureCode?: string;
+  raw?: Record<string, unknown>;
+}
+
 export interface WebhookEnvelope {
   eventId: string;
   reference: string;
   providerRef: string;
-  outcome: ChargeOutcome;
+  outcome: WebhookOutcome;
   failureCode?: string;
   amountMinor?: number;
   card?: StoredCard;
@@ -56,8 +84,9 @@ export interface RecurringProvider {
 
   createSetupCheckout(request: SetupRequest): Promise<SetupSession>;
   charge(request: ChargeRequest): Promise<ChargeResult>;
+  refund(request: RefundRequest): Promise<RefundResult>;
   status(providerRef: string): Promise<ChargeResult>;
-  cancelRecurring(providerRef: string): Promise<void>;
+  cancelRecurring(providerRef: string): Promise<CancelResult>;
 
   verifyWebhook(rawBody: Buffer | string): WebhookEnvelope | null;
 }

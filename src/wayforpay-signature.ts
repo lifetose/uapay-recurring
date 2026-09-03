@@ -86,3 +86,22 @@ export function signAcknowledgement(
 ): string {
   return wayforpaySignature(secret, [orderReference, status, time]);
 }
+
+export interface WayForPayRefundFields {
+  merchantAccount: string;
+  orderReference: string;
+  amount: number;
+  currency: string;
+}
+
+export function signRefund(
+  secret: string,
+  fields: WayForPayRefundFields,
+): string {
+  return wayforpaySignature(secret, [
+    fields.merchantAccount,
+    fields.orderReference,
+    fields.amount,
+    fields.currency,
+  ]);
+}

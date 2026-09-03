@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { createLiqPay, liqpayOutcome } from "./liqpay.js";
+import { createLiqPay, liqpayOutcome, liqpayRefundOutcome } from "./liqpay.js";
 import {
   decodeLiqPayData,
   encodeLiqPayData,
@@ -179,5 +179,136 @@ describe("createSetupCheckout", () => {
       amount: 4.99,
       server_url: "https://example.com/hook",
     });
+  });
+});
+
+function stubbed(
+  reply: Record<string, unknown>,
+  bodies: Record<string, unknown>[] = [],
+) {
+  return createLiqPay(
+    { publicKey: PUBLIC_KEY, privateKey: PRIVATE_KEY },
+    {
+      fetch: ((_url: string, init: RequestInit) => {
+        const form = new URLSearchParams(String(init.body));
+
+        bodies.push(decodeLiqPayData(form.get("data")!)!);
+
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(reply),
+        });
+      }) as unknown as typeof globalThis.fetch,
+    },
+  );
+}
+
+describe("liqpayRefundOutcome", () => {
+  it("treats reversed as refunded", () => {
+    expect(liqpayRefundOutcome("reversed")).toBe("refunded");
+  });
+
+  it.each(["failure", "error"])("treats %s as failed", (status) => {
+    expect(liqpayRefundOutcome(status)).toBe("failed");
+  });
+
+  it.each(["wait_reserve", "something new", undefined])(
+    "leaves %s pending rather than inviting a second refund",
+    (status) => {
+      expect(liqpayRefundOutcome(status)).toBe("pending");
+    },
+  );
+});
+
+describe("refund", () => {
+  it("sends a signed refund for the order", async () => {
+    const bodies: Record<string, unknown>[] = [];
+
+    const result = await stubbed(
+      { status: "reversed", payment_id: 10_000_001 },
+      bodies,
+    ).refund({ reference: "pay-1", amountMinor: 499, currency: "USD" });
+
+    expect(bodies[0]).toMatchObject({
+      action: "refund",
+      order_id: "pay-1",
+      amount: 4.99,
+      version: "3",
+      public_key: PUBLIC_KEY,
+    });
+
+    expect(result.outcome).toBe("refunded");
+    expect(result.providerRef).toBe("10000001");
+    expect(result.amountMinor).toBe(499);
+  });
+
+  it("refunds part of a payment when asked for less than the whole", async () => {
+    const bodies: Record<string, unknown>[] = [];
+
+    await stubbed({ status: "reversed" }, bodies).refund({
+      reference: "pay-1",
+      amountMinor: 200,
+      currency: "USD",
+    });
+
+    expect(bodies[0]).toMatchObject({ amount: 2 });
+  });
+
+  it("reports a refused refund with its error code", async () => {
+    const result = await stubbed({
+      status: "error",
+      err_code: "payment_err_status",
+    }).refund({ reference: "pay-1", amountMinor: 499, currency: "USD" });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.failureCode).toBe("payment_err_status");
+  });
+
+  it("holds wait_reserve as pending", async () => {
+    const result = await stubbed({ status: "wait_reserve" }).refund({
+      reference: "pay-1",
+      amountMinor: 499,
+      currency: "USD",
+    });
+
+    expect(result.outcome).toBe("pending");
+  });
+});
+
+describe("verifyWebhook, refund callbacks", () => {
+  it("reads reversed as a refund rather than a failed charge", () => {
+    const envelope = provider.verifyWebhook(callback({ status: "reversed" }));
+
+    expect(envelope?.outcome).toBe("refunded");
+    expect(envelope?.failureCode).toBeUndefined();
+    expect(envelope?.card).toBeUndefined();
+  });
+});
+
+describe("cancelRecurring", () => {
+  it("reports an accepted unsubscribe", async () => {
+    const bodies: Record<string, unknown>[] = [];
+
+    const result = await stubbed(
+      { status: "unsubscribed" },
+      bodies,
+    ).cancelRecurring("pay-1");
+
+    expect(bodies[0]).toMatchObject({
+      action: "unsubscribe",
+      order_id: "pay-1",
+    });
+    expect(result.outcome).toBe("cancelled");
+  });
+
+  it("reports a refusal instead of silently succeeding", async () => {
+    const result = await stubbed({
+      status: "error",
+      err_code: "order_id_empty",
+    }).cancelRecurring("pay-1");
+
+    expect(result.outcome).toBe("failed");
+    expect(result.failureCode).toBe("order_id_empty");
   });
 });

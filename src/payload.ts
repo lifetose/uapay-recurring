@@ -44,10 +44,15 @@ const REDACTED = "[redacted]";
 
 export function redactTokens(
   payload: Record<string, unknown>,
+  secrets: readonly string[] = [],
 ): Record<string, unknown> {
+  const wanted = new Set(secrets.filter((secret) => secret.length > 0));
+
   const walk = (value: unknown, key?: string): unknown => {
     if (typeof value === "string") {
-      return key !== undefined && TOKEN_FIELDS.includes(key) ? REDACTED : value;
+      const isNamed = key !== undefined && TOKEN_FIELDS.includes(key);
+
+      return isNamed || wanted.has(value) ? REDACTED : value;
     }
 
     if (Array.isArray(value)) {

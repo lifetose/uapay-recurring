@@ -81,3 +81,30 @@ describe("redactTokens", () => {
     });
   });
 });
+
+describe("redactTokens, by value", () => {
+  it("redacts a token wherever it appears, not only under a known key", () => {
+    const redacted = redactTokens(
+      { note: "charged with rec-token-1", meta: { echoed: "rec-token-1" } },
+      ["rec-token-1"],
+    );
+
+    expect(redacted).toEqual({
+      note: "charged with rec-token-1",
+      meta: { echoed: "[redacted]" },
+    });
+  });
+
+  it("still redacts the known key names with no secrets passed", () => {
+    expect(redactTokens({ recToken: "abc" })).toEqual({
+      recToken: "[redacted]",
+    });
+  });
+
+  it("ignores an empty secret so it does not redact every empty string", () => {
+    expect(redactTokens({ blank: "", kept: "value" }, [""])).toEqual({
+      blank: "",
+      kept: "value",
+    });
+  });
+});

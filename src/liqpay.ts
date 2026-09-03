@@ -5,15 +5,20 @@ import {
 } from "./liqpay-signature.js";
 import { last4Of, numeric, text, toBuffer, toMajorUnits } from "./payload.js";
 import {
+  CancelResult,
   ChargeOutcome,
   ChargeRequest,
   ChargeResult,
   ProviderOptions,
   RecurringProvider,
+  RefundOutcome,
+  RefundRequest,
+  RefundResult,
   SetupRequest,
   SetupSession,
   StoredCard,
   WebhookEnvelope,
+  WebhookOutcome,
 } from "./types.js";
 
 const API_URL = "https://www.liqpay.ua/api/request";
@@ -34,6 +39,10 @@ const PENDING = new Set([
   "wait_card",
   "hold_wait",
 ]);
+
+const REVERSED = new Set(["reversed"]);
+
+const REFUND_FAILED = new Set(["failure", "error"]);
 
 export interface LiqPayCredentials {
   publicKey: string;
@@ -58,6 +67,22 @@ export function liqpayOutcome(status: string | undefined): ChargeOutcome {
   }
 
   return "failed";
+}
+
+export function liqpayRefundOutcome(status: string | undefined): RefundOutcome {
+  if (status && REVERSED.has(status)) {
+    return "refunded";
+  }
+
+  if (status && REFUND_FAILED.has(status)) {
+    return "failed";
+  }
+
+  return "pending";
+}
+
+function liqpayWebhookOutcome(status: string): WebhookOutcome {
+  return REVERSED.has(status) ? "refunded" : liqpayOutcome(status);
 }
 
 class LiqPayProvider implements RecurringProvider {
@@ -161,6 +186,32 @@ class LiqPayProvider implements RecurringProvider {
     };
   }
 
+  public async refund(request: RefundRequest): Promise<RefundResult> {
+    const response = await this.call({
+      action: "refund",
+      order_id: request.reference,
+      amount: toMajorUnits(request.amountMinor),
+    });
+
+    const outcome = liqpayRefundOutcome(response.status);
+
+    return {
+      outcome,
+      providerRef: String(
+        response.payment_id ?? response.order_id ?? request.reference,
+      ),
+      amountMinor: request.amountMinor,
+      ...(outcome === "failed"
+        ? { failureCode: response.err_code ?? "declined" }
+        : {}),
+      raw: {
+        status: response.status ?? null,
+        errCode: response.err_code ?? null,
+        errDescription: response.err_description ?? null,
+      },
+    };
+  }
+
   public async status(providerRef: string): Promise<ChargeResult> {
     const response = await this.call({
       action: "status",
@@ -174,8 +225,27 @@ class LiqPayProvider implements RecurringProvider {
     };
   }
 
-  public async cancelRecurring(providerRef: string): Promise<void> {
-    await this.call({ action: "unsubscribe", order_id: providerRef });
+  public async cancelRecurring(providerRef: string): Promise<CancelResult> {
+    const response = await this.call({
+      action: "unsubscribe",
+      order_id: providerRef,
+    });
+
+    const outcome =
+      response.status === "unsubscribed" ? "cancelled" : ("failed" as const);
+
+    return {
+      outcome,
+      providerRef,
+      ...(outcome === "failed"
+        ? { failureCode: response.err_code ?? "unknown" }
+        : {}),
+      raw: {
+        status: response.status ?? null,
+        errCode: response.err_code ?? null,
+        errDescription: response.err_description ?? null,
+      },
+    };
   }
 
   public verifyWebhook(rawBody: Buffer | string): WebhookEnvelope | null {
@@ -207,7 +277,7 @@ class LiqPayProvider implements RecurringProvider {
     }
 
     const status = text(payload["status"]);
-    const outcome = liqpayOutcome(status);
+    const outcome = liqpayWebhookOutcome(status);
     const cardToken = text(payload["card_token"]);
     const last4 = last4Of(text(payload["sender_card_mask2"]));
     const expMonth = numeric(payload["sender_card_exp_month"]);
