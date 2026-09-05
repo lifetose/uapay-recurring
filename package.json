@@ -1,10 +1,11 @@
 {
   "name": "uapay-recurring",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Recurring card billing for WayForPay and LiqPay: one interface, signed webhooks, server-side renewals and a dunning ladder, for products that cannot use Stripe.",
   "keywords": [
     "wayforpay",
     "liqpay",
+    "monobank",
     "recurring",
     "subscriptions",
     "billing",

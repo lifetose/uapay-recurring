@@ -1,6 +1,6 @@
 # uapay-recurring
 
-Recurring card billing for **WayForPay** and **LiqPay**, behind one interface.
+Recurring card billing for **WayForPay**, **LiqPay** and **monobank**, behind one interface.
 
 Stripe does not contract with Ukrainian entities. The acquirers that do have no subscription
 product: they will store a card and let you charge it again, and everything above that — the
@@ -10,8 +10,9 @@ layer, extracted from a product that runs it in production.
 - **No hosted subscription page.** The card is captured once on the acquirer's page, which returns
   a recurring token. Every renewal after that is a server-side charge against the stored token.
 - **Signatures are verified before parsing.** WayForPay is HMAC-MD5 over a fixed field order,
-  LiqPay a base64 `data` + SHA-1 `signature` envelope. Both are tested against tampered amounts,
-  tampered statuses and foreign secrets.
+  LiqPay a base64 `data` + SHA-1 `signature` envelope, monobank an ECDSA signature in an `X-Sign`
+  header over the raw body. All three are tested against tampered amounts, tampered statuses and
+  foreign keys.
 - **No dependencies.** Node 20+, `fetch` and `node:crypto`. TypeScript types included.
 - **No database.** It does not own your subscriptions; it gives you the provider calls, the webhook
   envelope and the schedule maths, and stays out of your schema.
@@ -243,6 +244,7 @@ rather than silently activating a subscription — reconcile `pending` payments 
 ```ts
 createWayForPay(credentials, options?): RecurringProvider
 createLiqPay(credentials, options?): RecurringProvider
+createMonobank(credentials, options?): RecurringProvider
 ```
 
 `options` takes `timeoutMs` (default 15s) and `fetch`, which is how the tests drive the providers
@@ -250,19 +252,70 @@ without a network.
 
 Every provider exposes:
 
-| Method                         | Does                                                                    |
-| ------------------------------ | ----------------------------------------------------------------------- |
-| `createSetupCheckout(req)`     | first payment, asking the acquirer to return a recurring token          |
-| `charge(req)`                  | a server-side charge against a stored token                             |
-| `refund(req)`                  | send back all or part of a payment                                      |
-| `status(providerRef)`          | the acquirer's own view of a payment, for reconciling `pending`         |
-| `cancelRecurring(providerRef)` | drops the acquirer-side regular payment, if there is one — read below   |
-| `verifyWebhook(rawBody)`       | `WebhookEnvelope` for a valid signed callback, `null` for anything else |
+| Method                             | Does                                                                    |
+| ---------------------------------- | ----------------------------------------------------------------------- |
+| `createSetupCheckout(req)`         | first payment, asking the acquirer to return a recurring token          |
+| `charge(req)`                      | a server-side charge against a stored token                             |
+| `refund(req)`                      | send back all or part of a payment                                      |
+| `status(providerRef)`              | the acquirer's own view of a payment, for reconciling `pending`         |
+| `cancelRecurring(providerRef)`     | drops the acquirer-side regular payment, if there is one — read below   |
+| `verifyWebhook(rawBody, headers?)` | `WebhookEnvelope` for a valid signed callback, `null` for anything else |
 
 Also exported: `wayforpaySignature`, `signPurchase`, `signCallback`, `signAcknowledgement`,
 `signRefund`, `liqpaySignature`, `encodeLiqPayData`, `decodeLiqPayData` — for signing a request this
 package does not cover, and `wayforpayOutcome` / `liqpayOutcome` / `wayforpayRefundOutcome` /
-`liqpayRefundOutcome` for mapping a status you read elsewhere.
+`liqpayRefundOutcome` / `monobankOutcome` / `monobankRefundOutcome` for mapping a status you read
+elsewhere. For monobank specifically: `verifyMonobankSignature`, `decodeMonobankPublicKey`,
+`MONOBANK_SIGNATURE_HEADER`, and `currencyNumber` / `currencyAlpha`.
+
+## monobank
+
+monobank signs its webhook in a header rather than in the body, and verifies against a key it
+publishes rather than a shared secret. That is why `verifyWebhook` takes a second argument — the
+other two providers ignore it.
+
+```ts
+import { createMonobank } from "uapay-recurring";
+
+const provider = createMonobank({ token: process.env.MONOBANK_TOKEN! });
+
+await provider.refreshPublicKey();
+```
+
+Fetch the key once at boot and keep it; it is stable, not per-request. If verification starts
+failing across the board, call `refreshPublicKey()` again — that is what a rotation looks like. You
+can also pass `publicKey` yourself and skip the call entirely, which is what the tests do.
+
+```ts
+app.post(
+  "/api/webhooks/billing/monobank",
+  express.raw({ type: "*/*" }),
+  (req, res) => {
+    const envelope = provider.verifyWebhook(req.body, req.headers);
+
+    if (!envelope) {
+      return res.sendStatus(401);
+    }
+
+    // …as for the other providers
+  },
+);
+```
+
+Three things differ from WayForPay and LiqPay, and the interface carries them rather than hiding
+them:
+
+- **The card is tokenised into a wallet.** `createSetupCheckout` sets `saveCardData.saveCard`, and
+  `customerRef` becomes monobank's `walletId` so the saved card belongs to a customer you can name.
+  Renewals go through `initiationKind: "merchant"`, which is what marks them merchant-initiated.
+- **Refunds are keyed by invoice, not by your order reference.** Pass the `providerRef` you stored
+  at charge time; it falls back to `reference` only so the common shape still works.
+- **`cancelRecurring` deletes the saved card** — monobank has no subscription object to cancel, so
+  removing the token is the honest equivalent. Pass the card token, not an invoice id.
+
+Amounts are already in minor units, so nothing is converted. Currencies are ISO 4217 _numbers_ on
+the wire; pass `"UAH"`, `"USD"` or `"EUR"` and `currencyNumber` maps them, or pass the number
+yourself. A code it does not know is refused rather than guessed at.
 
 ## What this does not do
 

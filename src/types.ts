@@ -4,7 +4,11 @@ export type RefundOutcome = "refunded" | "failed" | "pending";
 
 export type WebhookOutcome = ChargeOutcome | "refunded";
 
-export type ProviderName = "wayforpay" | "liqpay";
+export type ProviderName = "wayforpay" | "liqpay" | "monobank";
+
+export type WebhookHeaders =
+  | { get(name: string): string | null }
+  | Record<string, string | string[] | undefined>;
 
 export interface StoredCard {
   token: string;
@@ -21,6 +25,7 @@ export interface SetupRequest {
   description: string;
   returnUrl: string;
   webhookUrl: string;
+  customerRef?: string;
 }
 
 export interface SetupSession {
@@ -57,6 +62,7 @@ export interface RefundRequest {
   amountMinor: number;
   currency: string;
   reason?: string;
+  providerRef?: string;
 }
 
 export interface RefundResult {
@@ -88,7 +94,10 @@ export interface RecurringProvider {
   status(providerRef: string): Promise<ChargeResult>;
   cancelRecurring(providerRef: string): Promise<CancelResult>;
 
-  verifyWebhook(rawBody: Buffer | string): WebhookEnvelope | null;
+  verifyWebhook(
+    rawBody: Buffer | string,
+    headers?: WebhookHeaders,
+  ): WebhookEnvelope | null;
 }
 
 export interface ProviderOptions {
